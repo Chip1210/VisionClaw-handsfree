@@ -65,7 +65,7 @@ Developer Mode. Confirm Settings > App connections now shows "Developer mode app
 ### 2. Build the app
 
 ```bash
-git clone https://github.com/YOUR-USER/VisionClaw-handsfree.git
+git clone https://github.com/Chip1210/VisionClaw-handsfree.git
 cd VisionClaw-handsfree/samples/CameraAccess
 cp CameraAccess/Secrets.swift.example CameraAccess/Secrets.swift
 open CameraAccess.xcodeproj
