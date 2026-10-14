@@ -62,7 +62,54 @@ class AudioManager {
     )!
   }
 
-  func setupAudioSession(useIPhoneMode: Bool = false) throws {
+  /// Hands-free standby: the capture unit keeps running (on the phone's own
+  /// mic, audio discarded) while no conversation is active, because iOS will
+  /// not let an app *start* audio capture from the lock screen. A capture
+  /// button press then only switches the route to the glasses.
+  private(set) var standbyActive = false
+  var isCapturingAudio: Bool { isCapturing }
+
+  private func deliverCaptured(_ chunk: Data) {
+    guard !standbyActive else { return }
+    onAudioCaptured?(chunk)
+  }
+
+  func enterStandby() throws {
+    guard !isCapturing else { return }
+    try setupAudioSession(useIPhoneMode: false, preferGlasses: true)
+    try startCapture()
+    standbyActive = true
+    NSLog("[Audio] Standby: capture running on glasses mic, audio discarded")
+  }
+
+  /// Standby -> live conversation: move the route to the glasses.
+  func activateFromStandby() {
+    guard standbyActive else { return }
+    let session = AVAudioSession.sharedInstance()
+    if session.currentRoute.inputs.first?.portType != .bluetoothHFP {
+      preferGlassesRoute(session)
+    }
+    standbyActive = false
+    NSLog("[Audio] Standby -> live")
+  }
+
+  /// Live conversation -> standby: keep capturing, but on the phone mic so the
+  /// glasses drop out of hands-free (call-quality) mode, and discard audio.
+  func returnToStandby() {
+    guard isCapturing else { return }
+    stopPlayback()
+    standbyActive = true
+    NSLog("[Audio] Live -> standby (route unchanged)")
+  }
+
+  func endStandby() {
+    guard standbyActive else { return }
+    standbyActive = false
+    stopCapture()
+    NSLog("[Audio] Standby ended")
+  }
+
+  func setupAudioSession(useIPhoneMode: Bool = false, preferGlasses: Bool = true) throws {
     self.useIPhoneMode = useIPhoneMode
     let session = AVAudioSession.sharedInstance()
     // voiceChat: aggressive echo cancellation (mic + speaker co-located on phone)
@@ -88,11 +135,41 @@ class AudioManager {
     if SettingsManager.shared.speakerOutputEnabled {
       try session.overrideOutputAudioPort(.speaker)
       NSLog("[Audio] Speaker output override: ON (iPhone speaker)")
+    } else if !useIPhoneMode, preferGlasses {
+      preferGlassesRoute(session)
+    } else if !useIPhoneMode,
+              let mic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+      try? session.setPreferredInput(mic)
     }
     NSLog("[Audio] Session mode: %@", useIPhoneMode ? "voiceChat (iPhone)" : "videoChat (glasses)")
+    logCurrentRoute(session, label: "after setup")
 
     setupInterruptionHandling()
     setupAppLifecycleObservers()
+  }
+
+  /// The glasses reach the phone as a Bluetooth hands-free (HFP) device. iOS
+  /// only routes a playAndRecord session through HFP when that device is the
+  /// session's preferred input; otherwise `.defaultToSpeaker` wins and the
+  /// reply plays out of the phone while the glasses stay silent. Pick the HFP
+  /// input explicitly so both mic and speaker follow it.
+  private func preferGlassesRoute(_ session: AVAudioSession) {
+    guard let hfp = session.availableInputs?.first(where: { $0.portType == .bluetoothHFP }) else {
+      NSLog("[Audio] No Bluetooth HFP input available; staying on phone audio")
+      return
+    }
+    do {
+      try session.setPreferredInput(hfp)
+      NSLog("[Audio] Preferred input set to %@ (%@)", hfp.portName, hfp.portType.rawValue)
+    } catch {
+      NSLog("[Audio] setPreferredInput failed: %@", error.localizedDescription)
+    }
+  }
+
+  private func logCurrentRoute(_ session: AVAudioSession, label: String) {
+    let ins = session.currentRoute.inputs.map { "\($0.portName)/\($0.portType.rawValue)" }.joined(separator: ", ")
+    let outs = session.currentRoute.outputs.map { "\($0.portName)/\($0.portType.rawValue)" }.joined(separator: ", ")
+    NSLog("[Audio] Route %@: in=[%@] out=[%@]", label, ins, outs)
   }
 
   private var vpioUnit: VoiceProcessingIOUnit?
@@ -208,7 +285,7 @@ class AudioManager {
             NSLog("[Audio] Sending chunk: %d bytes (~%dms)",
                   chunk.count, chunk.count / 32)  // 16kHz * 2 bytes = 32 bytes/ms
           }
-          self.onAudioCaptured?(chunk)
+          self.deliverCaptured(chunk)
         }
       }
     }
@@ -255,7 +332,7 @@ class AudioManager {
     // mid-reply, heard as sentence-skips and speed jumps. Server-side
     // interruption still works; energy-based flushing does not come back.
     _ = loudChunkStreak
-    onAudioCaptured?(chunk)
+    deliverCaptured(chunk)
   }
 
   private static func rmsOfInt16(_ data: Data) -> Double {
@@ -318,6 +395,25 @@ class AudioManager {
     }
   }
 
+  /// Two short rising beeps through the current output (the glasses during a
+  /// conversation): "Gemini is listening". 24 kHz 16-bit mono like the model's
+  /// own audio, so it goes through the same playback path.
+  func playReadyTone() {
+    let rate = GeminiConfig.outputAudioSampleRate
+    var samples = [Int16]()
+    for (freq, ms) in [(880.0, 90), (1320.0, 120)] {
+      let n = Int(rate * Double(ms) / 1000)
+      for i in 0..<n {
+        let t = Double(i) / rate
+        let env = min(1, Double(min(i, n - i)) / (rate * 0.01))
+        samples.append(Int16(sin(2 * .pi * freq * t) * 0.25 * env * 32767))
+      }
+      samples.append(contentsOf: [Int16](repeating: 0, count: Int(rate * 0.04)))
+    }
+    let data = samples.withUnsafeBufferPointer { Data(buffer: $0) }
+    playAudio(data: data)
+  }
+
   func stopPlayback() {
     if let vpioUnit {
       vpioUnit.clearPlayback()
@@ -344,7 +440,7 @@ class AudioManager {
       if !self.accumulatedData.isEmpty {
         let chunk = self.accumulatedData
         self.accumulatedData = Data()
-        self.onAudioCaptured?(chunk)
+        self.deliverCaptured(chunk)
       }
     }
     removeObservers()
@@ -431,6 +527,7 @@ class AudioManager {
   }
 
   private func handleRouteChange(reason: AVAudioSession.RouteChangeReason) {
+    logCurrentRoute(AVAudioSession.sharedInstance(), label: "after change \(reason.rawValue)")
     switch reason {
     case .newDeviceAvailable:
       NSLog("[Audio] New audio device available")

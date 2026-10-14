@@ -62,6 +62,7 @@ struct StreamSessionView: View {
         await viewModel?.captureStillForAgent()
       }
       geminiVM.streamingMode = viewModel.streamingMode
+      viewModel.enterStandbyIfPossible()
       await autoStartIfNeeded()
     }
     .onChange(of: viewModel.streamingMode) { newMode in

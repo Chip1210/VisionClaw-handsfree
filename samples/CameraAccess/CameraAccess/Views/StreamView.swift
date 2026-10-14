@@ -158,6 +158,8 @@ struct StreamView: View {
       .padding(.all, 24)
     }
     .onDisappear {
+      NSLog("[View] StreamView disappeared (status %@, gemini %@)",
+            String(describing: viewModel.streamingStatus), geminiVM.isGeminiActive ? "active" : "idle")
       Task {
         if viewModel.streamingStatus != .stopped {
           await viewModel.stopSession()

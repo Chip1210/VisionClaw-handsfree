@@ -28,7 +28,9 @@ enum VoiceEngine: String, CaseIterable {
   var modelPath: String {
     switch self {
     case .natural: return "models/gemini-2.5-flash-native-audio-preview-12-2025"
-    case .fast: return "models/gemini-live-2.5-flash-preview"
+    // gemini-live-2.5-flash-preview was retired (Google closes the socket with
+    // "not found"); gemini-3.8-live is the current default Live model.
+    case .fast: return "models/gemini-3.8-live"
     }
   }
 }
@@ -70,6 +72,7 @@ final class SettingsManager {
     case speakerOutputEnabled
     case videoStreamingEnabled
     case proactiveNotificationsEnabled
+    case handsFreeStandbyEnabled
   }
 
   private init() {}
@@ -154,6 +157,13 @@ final class SettingsManager {
   }
 
   // MARK: - Audio
+
+  /// Keep the microphone path open while idle so the glasses' capture button
+  /// can start a conversation from the lock screen. Default on.
+  var handsFreeStandbyEnabled: Bool {
+    get { defaults.object(forKey: Key.handsFreeStandbyEnabled.rawValue) as? Bool ?? true }
+    set { defaults.set(newValue, forKey: Key.handsFreeStandbyEnabled.rawValue) }
+  }
 
   var speakerOutputEnabled: Bool {
     get { defaults.bool(forKey: Key.speakerOutputEnabled.rawValue) }

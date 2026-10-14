@@ -26,6 +26,8 @@ class GeminiSessionViewModel: ObservableObject {
   private var stateObservation: Task<Void, Never>?
 
   var streamingMode: StreamingMode = .glasses
+  /// Last close reason the socket reported, so a failed connect can say why.
+  private var lastCloseReason: String?
 
   func startSession() async {
     guard !isGeminiActive else { return }
@@ -36,6 +38,7 @@ class GeminiSessionViewModel: ObservableObject {
     }
 
     isGeminiActive = true
+    lastCloseReason = nil
 
     // Wire audio callbacks
     audioManager.onAudioCaptured = { [weak self] data in
@@ -55,6 +58,10 @@ class GeminiSessionViewModel: ObservableObject {
 
     geminiService.onAudioReceived = { [weak self] data in
       self?.audioManager.playAudio(data: data)
+    }
+
+    geminiService.onReady = { [weak self] in
+      self?.audioManager.playReadyTone()
     }
 
     audioManager.onVoiceToVoiceLatency = { [weak self] seconds in
@@ -100,6 +107,7 @@ class GeminiSessionViewModel: ObservableObject {
     geminiService.onDisconnected = { [weak self] reason in
       guard let self else { return }
       Task { @MainActor in
+        self.lastCloseReason = reason
         guard self.isGeminiActive else { return }
         self.stopSession()
         self.errorMessage = "Connection lost: \(reason ?? "Unknown error")"
@@ -145,12 +153,58 @@ class GeminiSessionViewModel: ObservableObject {
       }
     }
 
-    // Setup audio
-    do {
-      try audioManager.setupAudioSession(useIPhoneMode: streamingMode == .iPhone)
-    } catch {
-      errorMessage = "Audio setup failed: \(error.localizedDescription)"
+    // Standby already has the capture unit running: just move the route to
+    // the glasses. This is the only path that works from the lock screen.
+    let fromStandby = audioManager.standbyActive && streamingMode == .glasses
+    if fromStandby {
+      audioManager.activateFromStandby()
+      // Give the hands-free Bluetooth link a moment to come up.
+      try? await Task.sleep(nanoseconds: 1_200_000_000)
+      echoCancellationOn = audioManager.echoCancellationActive
+    } else {
+      if audioManager.standbyActive { audioManager.endStandby() }
+      // Setup audio
+      do {
+        try audioManager.setupAudioSession(useIPhoneMode: streamingMode == .iPhone)
+      } catch {
+        errorMessage = "Audio setup failed: \(error.localizedDescription)"
+        isGeminiActive = false
+        return
+      }
+    }
+
+    // Start mic capture BEFORE the network round trip. Running audio I/O is
+    // what keeps the app alive when a session is started from the lock screen
+    // (capture-button double press); if the socket connect comes first, iOS
+    // suspends the app mid-handshake and nothing ever starts. Audio captured
+    // before the socket is ready is dropped by sendAudio, so the order is safe.
+    // From the lock screen the glasses' hands-free audio link is still coming
+    // up when the first start is attempted and Core Audio refuses it with
+    // "unspecified" (2003329396). Give the link a few seconds, retrying the
+    // whole audio bring-up each time, before giving up.
+    var captureError: Error?
+    for attempt in 1...6 where !fromStandby {
+      do {
+        if attempt > 1 {
+          try? await Task.sleep(nanoseconds: 1_000_000_000)
+          try audioManager.setupAudioSession(useIPhoneMode: streamingMode == .iPhone)
+        }
+        try audioManager.startCapture()
+        echoCancellationOn = audioManager.echoCancellationActive
+        captureError = nil
+        if attempt > 1 { NSLog("[Audio] Capture started on attempt %d", attempt) }
+        break
+      } catch {
+        captureError = error
+        NSLog("[Audio] Capture start attempt %d failed: %@", attempt, error.localizedDescription)
+      }
+    }
+    if let captureError {
+      errorMessage = "Mic capture failed: \(captureError.localizedDescription)"
+      stateObservation?.cancel()
+      stateObservation = nil
       isGeminiActive = false
+      connectionState = .disconnected
       return
     }
 
@@ -161,24 +215,19 @@ class GeminiSessionViewModel: ObservableObject {
       let msg: String
       if case .error(let err) = geminiService.connectionState {
         msg = err
+      } else if let closeReason = lastCloseReason {
+        msg = "Gemini closed the connection: \(closeReason)"
       } else {
         msg = "Failed to connect to Gemini"
       }
+      NSLog("[Gemini] Connect failed: %@", msg)
       errorMessage = msg
-      geminiService.disconnect()
-      stateObservation?.cancel()
-      stateObservation = nil
-      isGeminiActive = false
-      connectionState = .disconnected
-      return
-    }
-
-    // Start mic capture
-    do {
-      try audioManager.startCapture()
-      echoCancellationOn = audioManager.echoCancellationActive
-    } catch {
-      errorMessage = "Mic capture failed: \(error.localizedDescription)"
+      // Keep the mic path alive for the next lock-screen attempt.
+      if fromStandby || SettingsManager.shared.handsFreeStandbyEnabled && streamingMode == .glasses {
+        audioManager.returnToStandby()
+      } else {
+        audioManager.stopCapture()
+      }
       geminiService.disconnect()
       stateObservation?.cancel()
       stateObservation = nil
@@ -217,7 +266,11 @@ class GeminiSessionViewModel: ObservableObject {
     eventClient.disconnect()
     toolCallRouter?.cancelAll()
     toolCallRouter = nil
-    audioManager.stopCapture()
+    if SettingsManager.shared.handsFreeStandbyEnabled, streamingMode == .glasses {
+      audioManager.returnToStandby()
+    } else {
+      audioManager.stopCapture()
+    }
     geminiService.disconnect()
     stateObservation?.cancel()
     stateObservation = nil
@@ -236,9 +289,42 @@ class GeminiSessionViewModel: ObservableObject {
   /// built in startSession() and discarded on stop, while this is called once
   /// when the view appears. Assigning directly would land on a nil router and
   /// silently do nothing.
+  /// Open the microphone path in standby so a capture-button press can start
+  /// a conversation from the lock screen. Must be called while the app is in
+  /// the foreground; iOS refuses to start capture from the background.
+  var isInStandby: Bool { audioManager.standbyActive }
+
+  @MainActor
+  func enterStandbyIfPossible() {
+    guard SettingsManager.shared.handsFreeStandbyEnabled else {
+      audioManager.endStandby()
+      return
+    }
+    guard !isGeminiActive, streamingMode == .glasses, !audioManager.standbyActive,
+          !audioManager.isCapturingAudio,
+          UIApplication.shared.applicationState == .active else { return }
+    do {
+      try audioManager.enterStandby()
+    } catch {
+      NSLog("[Audio] Standby failed: %@", error.localizedDescription)
+    }
+  }
+
   func attachCamera(captureStill: @escaping () async -> UIImage?) {
     cameraStillProvider = captureStill
     wireCameraIntoRouter()
+  }
+
+  /// Glasses capture button: hand Gemini a sharp still and ask it to describe
+  /// it aloud. The image goes over the realtime channel (as look_closely does)
+  /// and the text turn makes the model answer instead of silently absorbing it.
+  func describeStill(_ image: UIImage) {
+    guard isGeminiActive, connectionState == .ready else { return }
+    geminiService.sendVideoFrame(image: image, quality: GeminiConfig.stillJPEGQuality)
+    geminiService.sendTextMessage(
+      "I just pressed the capture button on my glasses to take a photo of what I'm looking at. "
+      + "Look at the sharp photo that just arrived and tell me what you see. If there is text, "
+      + "read it out. Keep it short unless the detail matters.")
   }
 
   private func wireCameraIntoRouter() {

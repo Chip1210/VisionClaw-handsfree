@@ -69,6 +69,33 @@ fixed it. The app now opens Meta AI's app-connections screen on that error.
 Reminder: a Personal Team build stops launching 7 days after install. Rebuild and reinstall
 from Xcode (Cmd+R with the phone connected) or ask Claude to run the same build and install.
 
+## Hands-free (2026-10-15)
+
+The glasses' capture button now drives everything (toolkit `MWDATInputs`, experimental):
+
+- Double press: start or end a Gemini conversation. Works with the phone locked.
+- Single press: sharp photo -> saved to the iPhone Photos library -> Gemini describes it.
+  While the app runs, the glasses' own single-press photo is intercepted (all or nothing).
+- Two rising beeps in the glasses = Gemini is listening. Speech during the ~2 s before that
+  is buffered and delivered, so you can talk right after the press.
+
+How it works, and the lessons that cost the most time:
+
+- The app opens a quiet `DeviceSession` whenever glasses are around and attaches Inputs.
+- iOS refuses to START audio capture from the lock screen (session activation or the audio
+  unit fails with 2003329396 'what'). So the app keeps a "standby" capture running on the
+  glasses' HFP mic with audio discarded (Settings > Hands-free toggle; orange mic dot stays
+  on). A double press only flips standby to live. Standby must be entered in the foreground.
+- Keep standby on the glasses mic, not the phone mic: switching the input at press time left
+  the capture unit silent for 10+ s.
+- Start the mic before the Gemini socket handshake, or iOS suspends the app mid-handshake.
+- The Gemini connect timeout is per attempt (generation counter) and the websocket delegate
+  ignores callbacks from a previous task; both used to kill the next conversation.
+- `StreamView.onDisappear` ends the conversation, and a freshly added camera stream can
+  report `.stopped` before `.starting`; that transient is ignored.
+- `gemini-live-2.5-flash-preview` was retired; the "fast" engine is `gemini-3.8-live`.
+- Audio must prefer the Bluetooth HFP input (Meta's audio guide) or replies play on the phone.
+
 ## Still unconfirmed (historical)
 
 Whether the Meta Adventurer LISA Edition glasses are supported by the toolkit at all. Phase 0

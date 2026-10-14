@@ -51,6 +51,7 @@ struct SettingsView: View {
   @State private var openClawGatewayToken: String = ""
   @State private var geminiSystemPrompt: String = ""
   @State private var speakerOutputEnabled: Bool = false
+  @State private var handsFreeStandbyEnabled: Bool = true
   @State private var videoStreamingEnabled: Bool = true
   @State private var proactiveNotificationsEnabled: Bool = true
   @State private var showResetConfirmation = false
@@ -190,6 +191,10 @@ struct SettingsView: View {
           Toggle("Speaker Output", isOn: $speakerOutputEnabled)
         }
 
+        Section(header: Text("Hands-free"), footer: Text("Keeps the microphone path open while the app is idle, so a double press of the glasses' capture button can start Gemini even with the phone locked. The orange microphone indicator stays on while the app runs; audio is discarded until a conversation starts. Takes effect on the next launch.")) {
+          Toggle("Lock-screen start (standby mic)", isOn: $handsFreeStandbyEnabled)
+        }
+
         Section(header: Text("Video"), footer: Text("Disable video streaming to save battery. Audio remains active for voice-only interaction.")) {
           Toggle("Video Streaming", isOn: $videoStreamingEnabled)
         }
@@ -299,6 +304,7 @@ struct SettingsView: View {
     openClawHookToken = settings.openClawHookToken
     openClawGatewayToken = settings.openClawGatewayToken
     speakerOutputEnabled = settings.speakerOutputEnabled
+    handsFreeStandbyEnabled = settings.handsFreeStandbyEnabled
     videoStreamingEnabled = settings.videoStreamingEnabled
     proactiveNotificationsEnabled = settings.proactiveNotificationsEnabled
   }
@@ -316,6 +322,7 @@ struct SettingsView: View {
     settings.openClawHookToken = openClawHookToken.trimmingCharacters(in: .whitespacesAndNewlines)
     settings.openClawGatewayToken = openClawGatewayToken.trimmingCharacters(in: .whitespacesAndNewlines)
     settings.speakerOutputEnabled = speakerOutputEnabled
+    settings.handsFreeStandbyEnabled = handsFreeStandbyEnabled
     settings.videoStreamingEnabled = videoStreamingEnabled
     settings.proactiveNotificationsEnabled = proactiveNotificationsEnabled
   }

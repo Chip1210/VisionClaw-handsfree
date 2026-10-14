@@ -22,6 +22,17 @@ class GeminiLiveService: ObservableObject {
   var onOutputTranscription: ((String) -> Void)?
   var onToolCall: ((GeminiToolCall) -> Void)?
   var onToolCallCancellation: ((GeminiToolCallCancellation) -> Void)?
+  /// Fired once the server has acknowledged setup and audio can flow.
+  var onReady: (() -> Void)?
+
+  // Audio spoken while the socket is still coming up (a hands-free start takes
+  // ~2 s) is kept and sent as soon as setup completes, so the first words of
+  // "hey, what's this?" are not lost. Capped at ~6 s of 16 kHz 16-bit mono.
+  private var preroll = Data()
+  /// Bumped per connect(); the timeout only applies to its own attempt. The
+  /// previous attempt's timer used to fire 15 s later into the next session.
+  private var connectGeneration = 0
+  private let prerollCap = 16_000 * 2 * 6
 
   // Latency tracking
   private var lastUserSpeechEnd: Date?
@@ -47,6 +58,8 @@ class GeminiLiveService: ObservableObject {
     }
 
     connectionState = .connecting
+    connectGeneration += 1
+    let generation = connectGeneration
 
     let result = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
       self.connectContinuation = continuation
@@ -63,6 +76,7 @@ class GeminiLiveService: ObservableObject {
       self.delegate.onClose = { [weak self] code, reason in
         guard let self else { return }
         let reasonStr = reason.flatMap { String(data: $0, encoding: .utf8) } ?? "no reason"
+        NSLog("[Gemini] Socket closed (code %d): %@", code.rawValue, reasonStr)
         Task { @MainActor in
           self.resolveConnect(success: false)
           self.connectionState = .disconnected
@@ -74,6 +88,7 @@ class GeminiLiveService: ObservableObject {
       self.delegate.onError = { [weak self] error in
         guard let self else { return }
         let msg = error?.localizedDescription ?? "Unknown error"
+        NSLog("[Gemini] Socket error: %@", msg)
         Task { @MainActor in
           self.resolveConnect(success: false)
           self.connectionState = .error(msg)
@@ -82,13 +97,16 @@ class GeminiLiveService: ObservableObject {
         }
       }
 
-      self.webSocketTask = self.urlSession.webSocketTask(with: url)
-      self.webSocketTask?.resume()
+      let task = self.urlSession.webSocketTask(with: url)
+      self.webSocketTask = task
+      self.delegate.currentTask = task
+      task.resume()
 
-      // Timeout after 15 seconds
+      // Timeout after 15 seconds, for this attempt only
       Task {
         try? await Task.sleep(nanoseconds: 15_000_000_000)
         await MainActor.run {
+          guard self.connectGeneration == generation else { return }
           self.resolveConnect(success: false)
           if self.connectionState == .connecting || self.connectionState == .settingUp {
             self.connectionState = .error("Connection timed out")
@@ -101,6 +119,8 @@ class GeminiLiveService: ObservableObject {
   }
 
   func disconnect() {
+    preroll = Data()
+    delegate.currentTask = nil
     receiveTask?.cancel()
     receiveTask = nil
     webSocketTask?.cancel(with: .normalClosure, reason: nil)
@@ -116,7 +136,13 @@ class GeminiLiveService: ObservableObject {
   }
 
   func sendAudio(data: Data) {
-    guard connectionState == .ready else { return }
+    guard connectionState == .ready else {
+      if connectionState == .connecting || connectionState == .settingUp {
+        preroll.append(data)
+        if preroll.count > prerollCap { preroll.removeFirst(preroll.count - prerollCap) }
+      }
+      return
+    }
     sendQueue.async { [weak self] in
       let base64 = data.base64EncodedString()
       let json: [String: Any] = [
@@ -281,6 +307,13 @@ class GeminiLiveService: ObservableObject {
     // Setup complete
     if json["setupComplete"] != nil {
       connectionState = .ready
+      if !preroll.isEmpty {
+        NSLog("[Gemini] Flushing %.1f s of pre-roll audio", Double(preroll.count) / 32_000)
+        let buffered = preroll
+        preroll = Data()
+        sendAudio(data: buffered)
+      }
+      onReady?()
       resolveConnect(success: true)
       return
     }
@@ -369,12 +402,16 @@ private class WebSocketDelegate: NSObject, URLSessionWebSocketDelegate {
   var onOpen: ((String?) -> Void)?
   var onClose: ((URLSessionWebSocketTask.CloseCode, Data?) -> Void)?
   var onError: ((Error?) -> Void)?
+  /// Only this task's events are forwarded. A cancelled socket's close can
+  /// arrive after the next connect() has installed fresh handlers.
+  weak var currentTask: URLSessionWebSocketTask?
 
   func urlSession(
     _ session: URLSession,
     webSocketTask: URLSessionWebSocketTask,
     didOpenWithProtocol protocol: String?
   ) {
+    guard webSocketTask === currentTask else { return }
     onOpen?(`protocol`)
   }
 
@@ -384,6 +421,10 @@ private class WebSocketDelegate: NSObject, URLSessionWebSocketDelegate {
     didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
     reason: Data?
   ) {
+    guard webSocketTask === currentTask else {
+      NSLog("[Gemini] Ignoring close from a previous socket (code %d)", closeCode.rawValue)
+      return
+    }
     onClose?(closeCode, reason)
   }
 
@@ -392,6 +433,7 @@ private class WebSocketDelegate: NSObject, URLSessionWebSocketDelegate {
     task: URLSessionTask,
     didCompleteWithError error: Error?
   ) {
+    guard task === currentTask else { return }
     if let error {
       onError?(error)
     }
