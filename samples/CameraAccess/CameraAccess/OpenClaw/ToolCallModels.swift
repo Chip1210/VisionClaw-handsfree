@@ -91,7 +91,13 @@ enum ToolDeclarations {
   /// `listCalendarEvents` / `createCalendarEvent` stay defined for the
   /// on-device path; add them back here to switch EventKit back on.
   static func allDeclarations() -> [[String: Any]] {
-    return [execute, lookCloselyDeclaration, createReminder]
+    // `execute` needs an action-agent backend (self-hosted OpenClaw or a cloud
+    // gateway). With neither configured, declaring it only teaches the model to
+    // call a tool that always fails; the on-device tools still work without it.
+    if GeminiConfig.isAgentConfigured {
+      return [execute, lookCloselyDeclaration, createReminder]
+    }
+    return [lookCloselyDeclaration, createReminder]
   }
 
   /// The ambient stream is one downscaled, compressed frame per second -- enough

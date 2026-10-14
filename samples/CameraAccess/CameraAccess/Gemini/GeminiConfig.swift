@@ -22,7 +22,24 @@ enum GeminiConfig {
 
   static var systemInstruction: String { SettingsManager.shared.geminiSystemPrompt }
 
-  static let defaultSystemInstruction = """
+  /// Default prompt when the Settings screen has none saved. Which one applies
+  /// depends on whether an action agent is configured: the agent prompt pushes
+  /// every task to the `execute` tool, which is not declared without a backend.
+  static var defaultSystemInstruction: String {
+    isAgentConfigured ? agentSystemInstruction : standaloneSystemInstruction
+  }
+
+  /// Gemini alone, with the camera and the on-device tools (sharp still,
+  /// reminders) but no action agent behind it.
+  static let standaloneSystemInstruction = """
+    You are an AI assistant for someone wearing Meta smart glasses. You can see through their camera and have a voice conversation. Keep responses concise and natural, as if talking to a friend standing next to them.
+
+    Describe and answer from what you see when asked. If text or small detail matters, use the look_closely tool to get a sharp photo before answering. You can create reminders with create_reminder.
+
+    You have no memory between sessions, cannot browse the web, send messages, or control other apps. If asked to do one of those, say briefly that you cannot do it from the glasses yet, then help with what you can.
+    """
+
+  static let agentSystemInstruction = """
     You are an AI assistant for someone wearing Meta Ray-Ban smart glasses. You can see through their camera and have a voice conversation. Keep responses concise and natural.
 
     CRITICAL: You have NO memory, NO storage, and NO ability to take actions on your own. You cannot remember things, keep lists, set reminders, search the web, send messages, or do anything persistent. You are ONLY a voice interface.
