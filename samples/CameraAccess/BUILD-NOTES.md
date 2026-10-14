@@ -96,6 +96,19 @@ How it works, and the lessons that cost the most time:
 - `gemini-live-2.5-flash-preview` was retired; the "fast" engine is `gemini-3.8-live`.
 - Audio must prefer the Bluetooth HFP input (Meta's audio guide) or replies play on the phone.
 
+## Voice launch ("Hey Meta, start VisionClaw") - code ready, blocked on Meta
+
+The app subscribes to the toolkit's experimental `VoiceInvocationsStream` (started once the
+device session is up; log line "[Voice] Listening for Hey Meta launch"). A `LaunchApp`
+invocation starts the conversation like a double press and answers `sendSuccess`.
+
+Tested 2026-10-15: Meta AI gave no response to the phrase and nothing reached the app.
+Meta's voice-invocation guide says routing depends entirely on a Wearables Developer Center
+app entry (bundle id `com.chip.VisionClaw`, app name "VisionClaw", icon) with the
+"Voice invocation" permission requested and approved by Meta. Developer Mode alone does not
+route the phrase. Once that exists, the app needs the Developer Center's Application ID
+(and ClientToken) in the `MWDAT` block of Info.plist; nothing else changes.
+
 ## Still unconfirmed (historical)
 
 Whether the Meta Adventurer LISA Edition glasses are supported by the toolkit at all. Phase 0

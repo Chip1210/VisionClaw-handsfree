@@ -190,10 +190,67 @@ class StreamSessionViewModel: ObservableObject {
             UIApplication.shared.backgroundTimeRemaining)
     }
     startHeartbeat()
+    setupVoiceInvocations()
   }
 
   private var activeObserver: NSObjectProtocol?
   private var backgroundObserver: NSObjectProtocol?
+
+  // MARK: - "Hey Meta, start VisionClaw" (toolkit voice invocations, experimental)
+  // Meta AI resolves the phrase to this app only if the app name is configured
+  // in the Wearables Developer Center with the Voice Invocation permission.
+  private var voiceInvocations: VoiceInvocationsStream?
+  private var voiceInvocationToken: AnyListenerToken?
+  private var voiceErrorToken: AnyListenerToken?
+  private var voiceDevicesTask: Task<Void, Never>?
+
+  private func setupVoiceInvocations() {
+    guard let wearables else { return }
+    do {
+      let stream = try VoiceInvocationsStream(wearables: wearables)
+      voiceInvocations = stream
+      // Listeners before start(), so an invocation that arrives at once is kept.
+      voiceInvocationToken = stream.invocationsPublisher.listen { [weak self] invocation in
+        Task { @MainActor [weak self] in await self?.handleVoiceInvocation(invocation) }
+      }
+      voiceErrorToken = stream.errorPublisher.listen { error in
+        NSLog("[Voice] error: %@", error.description)
+      }
+      startVoiceInvocations(for: wearables.devices)
+      voiceDevicesTask = Task { @MainActor [weak self] in
+        for await devices in wearables.devicesStream() {
+          guard let self else { return }
+          self.startVoiceInvocations(for: devices)
+        }
+      }
+    } catch {
+      NSLog("[Voice] VoiceInvocationsStream unavailable: %@", String(describing: error))
+    }
+  }
+
+  private func startVoiceInvocations(for devices: [DeviceIdentifier]) {
+    guard let stream = voiceInvocations, let device = devices.first else { return }
+    do {
+      try stream.start(deviceIdentifier: device)
+      NSLog("[Voice] Listening for Hey Meta launch on %@", String(describing: device))
+    } catch {
+      NSLog("[Voice] start failed: %@", String(describing: error))
+    }
+  }
+
+  private func handleVoiceInvocation(_ invocation: any VoiceInvocation) async {
+    guard let launch = invocation as? LaunchApp else {
+      NSLog("[Voice] Unhandled invocation: %@", String(describing: invocation))
+      return
+    }
+    NSLog("[Voice] LaunchApp from %@", String(describing: launch.deviceIdentifier))
+    if streamingMode == .glasses, !isStreaming {
+      await handleStartStreaming()
+      await startGeminiIfNeeded(reason: "Hey Meta")
+    }
+    let ok = await launch.responseHandle.sendSuccess(actionOutput: nil)
+    NSLog("[Voice] sendSuccess delivered: %@", ok ? "yes" : "no")
+  }
   private var heartbeatTask: Task<Void, Never>?
 
   /// Proves in the log whether the app is still running while the phone is
@@ -289,6 +346,10 @@ class StreamSessionViewModel: ObservableObject {
     case .started:
       if inputs == nil {
         attachInputs()
+      }
+      // The voice-invocation channel is only connected once a session is up.
+      if let wearables, voiceInvocations != nil {
+        startVoiceInvocations(for: wearables.devices)
       }
       // A camera can only be added to a started session; start it now if the
       // user asked to stream and one isn't already attached.
